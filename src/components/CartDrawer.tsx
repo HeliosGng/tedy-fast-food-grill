@@ -1,7 +1,25 @@
 import React, { useState } from 'react';
 import { CartItem, Language } from '../types';
 import { TRANSLATIONS } from '../data/translations';
-import { X, Trash2, Plus, Minus, ShoppingBag, Phone, Send, MapPin, User, FileText, CheckCircle2 } from 'lucide-react';
+import { 
+  X, 
+  Trash2, 
+  Plus, 
+  Minus, 
+  ShoppingBag, 
+  Phone, 
+  Send, 
+  MapPin, 
+  User, 
+  FileText, 
+  CheckCircle2, 
+  Navigation, 
+  Crosshair, 
+  Loader2, 
+  ExternalLink, 
+  RotateCw, 
+  AlertCircle 
+} from 'lucide-react';
 
 interface CartDrawerProps {
   isOpen: boolean;
@@ -11,6 +29,13 @@ interface CartDrawerProps {
   onUpdateQuantity: (cartItemId: string, newQty: number) => void;
   onRemoveItem: (cartItemId: string) => void;
   onClearCart: () => void;
+}
+
+interface GPSCoordinates {
+  latitude: number;
+  longitude: number;
+  accuracy: number;
+  timestamp: number;
 }
 
 export const CartDrawer: React.FC<CartDrawerProps> = ({
@@ -32,16 +57,124 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
   const [orderNotes, setOrderNotes] = useState('');
   const [showOrderSubmitted, setShowOrderSubmitted] = useState(false);
 
+  // GPS state
+  const [gpsData, setGpsData] = useState<GPSCoordinates | null>(null);
+  const [isFetchingGps, setIsFetchingGps] = useState(false);
+  const [gpsError, setGpsError] = useState<string | null>(null);
+
   const subtotal = cart.reduce((sum, item) => sum + item.totalPrice, 0);
   const totalItemsCount = cart.reduce((sum, item) => sum + item.quantity, 0);
 
-  const handleSendWhatsAppOrder = (e: React.FormEvent) => {
+  // Function to explicitly acquire client GPS coordinates
+  const handleCaptureGps = () => {
+    if (!navigator.geolocation) {
+      setGpsError(lang === 'en' ? 'Geolocation not supported by browser.' : 'GPS nuk mbështetet nga ky shfletues.');
+      return;
+    }
+
+    setIsFetchingGps(true);
+    setGpsError(null);
+
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        const coords: GPSCoordinates = {
+          latitude: pos.coords.latitude,
+          longitude: pos.coords.longitude,
+          accuracy: pos.coords.accuracy,
+          timestamp: pos.timestamp,
+        };
+        setGpsData(coords);
+        setIsFetchingGps(false);
+
+        // Auto-fill address via reverse geocode if address field is still empty
+        if (!address.trim()) {
+          try {
+            const resp = await fetch(
+              `https://nominatim.openstreetmap.org/reverse?lat=${coords.latitude}&lon=${coords.longitude}&format=json`,
+              {
+                headers: {
+                  'Accept-Language': lang === 'sq' ? 'sq,en' : 'en',
+                },
+              }
+            );
+            if (resp.ok) {
+              const data = await resp.json();
+              if (data?.address) {
+                const road = data.address.road || data.address.pedestrian || data.address.neighbourhood || '';
+                const houseNumber = data.address.house_number ? ` Nr. ${data.address.house_number}` : '';
+                const city = data.address.city || data.address.town || data.address.municipality || 'Tiranë';
+                const formatted = road ? `${road}${houseNumber}, ${city}` : data.display_name?.split(',').slice(0, 2).join(', ');
+                if (formatted) {
+                  setAddress(formatted);
+                }
+              }
+            }
+          } catch {
+            // Non-critical fallback
+          }
+        }
+      },
+      (err) => {
+        setIsFetchingGps(false);
+        if (err.code === 1) {
+          setGpsError(t.cart.gpsDenied);
+        } else {
+          setGpsError(lang === 'en' ? 'Could not determine location. Please write address.' : 'Nuk u arrit marrja e GPS. Shkruani adresën.');
+        }
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 10000,
+        maximumAge: 10000,
+      }
+    );
+  };
+
+  const handleSendWhatsAppOrder = async (e: React.FormEvent) => {
     e.preventDefault();
     if (cart.length === 0) return;
 
-    if (!fullName.trim() || !phone.trim() || !address.trim()) {
-      alert(lang === 'en' ? 'Please fill in your Name, Phone and Delivery Address.' : 'Ju lutemi plotësoni Emrin, Telefonin dhe Adresën e dërgesës.');
+    if (!fullName.trim() || !phone.trim() || (!address.trim() && !gpsData)) {
+      alert(
+        lang === 'en'
+          ? 'Please provide your Name, Phone, and Delivery Address or GPS location.'
+          : 'Ju lutemi plotësoni Emrin, Telefonin dhe Adresën ose vendndodhjen GPS.'
+      );
       return;
+    }
+
+    // If client hasn't captured GPS yet, attempt a quick non-blocking fetch so courier gets the exact pin
+    let activeGps = gpsData;
+    if (!activeGps && navigator.geolocation) {
+      setIsFetchingGps(true);
+      try {
+        activeGps = await new Promise<GPSCoordinates | null>((resolve) => {
+          const timer = setTimeout(() => resolve(null), 2500);
+          navigator.geolocation.getCurrentPosition(
+            (pos) => {
+              clearTimeout(timer);
+              resolve({
+                latitude: pos.coords.latitude,
+                longitude: pos.coords.longitude,
+                accuracy: pos.coords.accuracy,
+                timestamp: pos.timestamp,
+              });
+            },
+            () => {
+              clearTimeout(timer);
+              resolve(null);
+            },
+            { enableHighAccuracy: true, timeout: 2500, maximumAge: 60000 }
+          );
+        });
+        if (activeGps) {
+          setGpsData(activeGps);
+        }
+      } catch {
+        // Continue smoothly
+      } finally {
+        setIsFetchingGps(false);
+      }
     }
 
     // Build the WhatsApp formatted message
@@ -52,7 +185,15 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
       return `• ${item.quantity}x ${itemName}${opts ? ` (${opts})` : ''}${instructions} — ${item.totalPrice} ALL`;
     }).join('\n');
 
-    const addressFull = floorApt ? `${address.trim()} (Kati/Hyrja: ${floorApt.trim()})` : address.trim();
+    const addressFull = address.trim() 
+      ? (floorApt ? `${address.trim()} (Kati/Hyrja: ${floorApt.trim()})` : address.trim())
+      : (lang === 'sq' ? 'Sipas koordinatave GPS të bashkëngjitura' : 'As per attached GPS coordinates');
+
+    const gpsBlock = activeGps
+      ? lang === 'sq'
+        ? `\n📍 VENDNDODHJA E SAKTË GPS (PIN NË HARTË):\n🗺️ https://www.google.com/maps?q=${activeGps.latitude.toFixed(6)},${activeGps.longitude.toFixed(6)}\n📐 Saktësia: ±${Math.round(activeGps.accuracy)} metra`
+        : `\n📍 EXACT GPS PIN LOCATION:\n🗺️ https://www.google.com/maps?q=${activeGps.latitude.toFixed(6)},${activeGps.longitude.toFixed(6)}\n📐 Accuracy: ±${Math.round(activeGps.accuracy)} meters`
+      : '';
 
     const message = lang === 'sq'
       ? `👋 Përshëndetje Tedy's Fast Food & Grill!
@@ -67,7 +208,7 @@ ${orderItemsText}
 📍 TË DHËNAT E KLIENTIT:
 👤 Emri: ${fullName.trim()}
 📞 Telefoni: ${phone.trim()}
-🏠 Adresa: ${addressFull}
+🏠 Adresa: ${addressFull}${gpsBlock}
 ${orderNotes.trim() ? `📝 Shënime: ${orderNotes.trim()}\n` : ''}
 Faleminderit!`
       : `👋 Hello Tedy's Fast Food & Grill!
@@ -82,7 +223,7 @@ ${orderItemsText}
 📍 DELIVERY DETAILS:
 👤 Name: ${fullName.trim()}
 📞 Phone: ${phone.trim()}
-🏠 Address: ${addressFull}
+🏠 Address: ${addressFull}${gpsBlock}
 ${orderNotes.trim() ? `📝 Notes: ${orderNotes.trim()}\n` : ''}
 Thank you!`;
 
@@ -259,15 +400,109 @@ Thank you!`;
                   />
                 </div>
 
-                <div>
+                {/* GPS Location Capture Card */}
+                <div className="rounded-xl border border-neutral-800 bg-neutral-950/70 p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1.5 text-xs font-semibold text-neutral-300">
+                      <Navigation className={`w-3.5 h-3.5 ${gpsData ? 'text-emerald-400' : 'text-orange-500'}`} />
+                      <span>{gpsData ? t.cart.gpsSuccess : t.cart.gpsButton}</span>
+                    </div>
+                    {gpsData && (
+                      <button
+                        type="button"
+                        onClick={() => setGpsData(null)}
+                        className="text-[10px] text-neutral-400 hover:text-red-400 transition-colors cursor-pointer"
+                      >
+                        {t.cart.gpsRemove}
+                      </button>
+                    )}
+                  </div>
+
+                  {!gpsData ? (
+                    <div>
+                      <button
+                        type="button"
+                        onClick={handleCaptureGps}
+                        disabled={isFetchingGps}
+                        className="w-full py-2 px-3 rounded-lg bg-orange-600/15 hover:bg-orange-600/25 border border-orange-500/30 text-orange-400 hover:text-orange-300 font-semibold text-xs flex items-center justify-center gap-2 transition-all cursor-pointer disabled:opacity-60"
+                      >
+                        {isFetchingGps ? (
+                          <>
+                            <Loader2 className="w-3.5 h-3.5 animate-spin text-orange-400" />
+                            <span>{t.cart.gpsFetching}</span>
+                          </>
+                        ) : (
+                          <>
+                            <Crosshair className="w-3.5 h-3.5 text-orange-400" />
+                            <span>{t.cart.gpsButton}</span>
+                          </>
+                        )}
+                      </button>
+                      <p className="text-[10px] text-neutral-400 mt-1.5 leading-tight">
+                        {t.cart.gpsTip}
+                      </p>
+                      {gpsError && (
+                        <p className="text-[11px] text-red-400 mt-1.5 flex items-center gap-1">
+                          <AlertCircle className="w-3 h-3 shrink-0" />
+                          <span>{gpsError}</span>
+                        </p>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="bg-emerald-950/30 border border-emerald-500/30 rounded-lg p-2.5 text-xs space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="font-mono text-[11px] text-emerald-300 font-medium">
+                          📍 {gpsData.latitude.toFixed(5)}, {gpsData.longitude.toFixed(5)}
+                        </span>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-medium">
+                          {t.cart.gpsAccuracy}: ±{Math.round(gpsData.accuracy)}m
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between pt-1.5 border-t border-emerald-500/20">
+                        <a
+                          href={`https://www.google.com/maps?q=${gpsData.latitude},${gpsData.longitude}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-[11px] text-emerald-400 hover:text-emerald-300 underline flex items-center gap-1"
+                        >
+                          <span>{t.cart.gpsViewPin}</span>
+                          <ExternalLink className="w-3 h-3" />
+                        </a>
+                        <button
+                          type="button"
+                          onClick={handleCaptureGps}
+                          disabled={isFetchingGps}
+                          className="text-[10px] text-neutral-400 hover:text-white flex items-center gap-1 transition-colors cursor-pointer"
+                        >
+                          <RotateCw className="w-2.5 h-2.5" />
+                          <span>Rifresko / Refresh</span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="relative">
                   <input
                     type="text"
-                    required
+                    required={!gpsData}
                     value={address}
                     onChange={e => setAddress(e.target.value)}
-                    placeholder={t.cart.address}
-                    className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3.5 py-2 text-xs text-white placeholder-neutral-500 focus:outline-none focus:border-orange-500"
+                    placeholder={gpsData ? `${t.cart.address} (Opsionale me GPS)` : t.cart.address}
+                    className="w-full bg-neutral-950 border border-neutral-800 rounded-xl pl-3.5 pr-10 py-2 text-xs text-white placeholder-neutral-500 focus:outline-none focus:border-orange-500"
                   />
+                  <button
+                    type="button"
+                    onClick={handleCaptureGps}
+                    title={t.cart.gpsButton}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-neutral-400 hover:text-orange-400 transition-colors cursor-pointer"
+                  >
+                    {isFetchingGps ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Crosshair className={`w-3.5 h-3.5 ${gpsData ? 'text-emerald-400' : ''}`} />
+                    )}
+                  </button>
                 </div>
 
                 <div>
