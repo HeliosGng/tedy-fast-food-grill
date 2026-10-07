@@ -1,0 +1,6 @@
+{
+  "name": "Tedy's Fast Food & Grill - Tirana",
+  "description": "Authentic grilled specialties, souvlakis, gyros, skepasti, stone oven pizza, burgers, and crepes in Tirana. Quick delivery & dine-in via WhatsApp and call.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
